@@ -18,6 +18,11 @@
     percent: null,
     resetsAt: null,
   };
+  const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+  let fontColor = typeof previous?.getFontColor === "function"
+    ? previous.getFontColor()
+    : null;
+  if (typeof fontColor !== "string" || !HEX_COLOR.test(fontColor)) fontColor = null;
 
   // --- CSS (Shadow DOM, isolated from host page) ---
   const cssText = `
@@ -115,6 +120,9 @@
     }
     :host([data-theme="dark"]) .battery-text {
       color: #fff;
+    }
+    :host([data-font-color]) :is(.battery-text, .battery-text-fill) {
+      color: var(--meter-font-color);
     }
     .battery[data-level="unknown"] .battery-text-fill {
       display: none;
@@ -257,6 +265,17 @@
 
   const shadow = host.attachShadow({ mode: "open" });
 
+  function setFontColor(value) {
+    fontColor = typeof value === "string" && HEX_COLOR.test(value) ? value.toUpperCase() : null;
+    if (fontColor) {
+      host.dataset.fontColor = "custom";
+      host.style.setProperty("--meter-font-color", fontColor);
+    } else {
+      delete host.dataset.fontColor;
+      host.style.removeProperty("--meter-font-color");
+    }
+  }
+
   const styleNode = document.createElement("style");
   styleNode.textContent = cssText;
 
@@ -297,6 +316,7 @@
   widget.appendChild(dateEl);
   shadow.appendChild(styleNode);
   shadow.appendChild(widget);
+  setFontColor(fontColor);
   mountInTitlebar();
 
   // --- Update ---
@@ -389,6 +409,8 @@
     cancelScheduledUpdate,
     ensureTimer,
     setQuota,
+    getFontColor: () => fontColor,
+    setFontColor,
     dispose,
     version: VERSION,
   };

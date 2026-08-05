@@ -249,9 +249,18 @@ function quotaExpression(quota) {
   return `window.__CODEX_METER_STATE__?.setQuota(${JSON.stringify(quota)})`;
 }
 
+function fontColorExpression(color) {
+  return `window.__CODEX_METER_STATE__?.setFontColor(${JSON.stringify(color)})`;
+}
+
 async function applyQuotaToSession(session, quota) {
   if (!quota || session.closed) return;
   await session.evaluate(quotaExpression(quota));
+}
+
+async function applyFontColorToSession(session, color) {
+  if (color === undefined || session.closed) return;
+  await session.evaluate(fontColorExpression(color));
 }
 
 function parseControlLine(line) {
@@ -261,6 +270,14 @@ function parseControlLine(line) {
 
   const message = JSON.parse(normalized);
   if (message?.type === "shutdown") return { type: "shutdown" };
+  if (message?.type === "fontColor") {
+    return {
+      type: "fontColor",
+      color: typeof message.color === "string" && /^#[0-9a-f]{6}$/i.test(message.color)
+        ? message.color.toUpperCase()
+        : null,
+    };
+  }
   if (message?.type !== "quota") return null;
   return {
     type: "quota",
@@ -373,6 +390,7 @@ async function runWatch(options) {
   const earlyScripts = new Map(); // targetId -> identifier
   const targetFailures = new Map();
   let latestQuota = null;
+  let latestFontColor;
   let stdinBuffer = "";
   let stopping = false;
   const stop = () => { stopping = true; };
@@ -397,6 +415,13 @@ async function runWatch(options) {
         for (const [id, session] of sessions) {
           applyQuotaToSession(session, latestQuota).catch((error) => {
             console.error(`[codex-meter] quota update failed for ${id}: ${error.message}`);
+          });
+        }
+      } else if (message?.type === "fontColor") {
+        latestFontColor = message.color;
+        for (const [id, session] of sessions) {
+          applyFontColorToSession(session, latestFontColor).catch((error) => {
+            console.error(`[codex-meter] font color update failed for ${id}: ${error.message}`);
           });
         }
       }
@@ -474,6 +499,7 @@ async function runWatch(options) {
         // Inject the widget
         await applyToSession(session, script);
         await applyQuotaToSession(session, latestQuota);
+        await applyFontColorToSession(session, latestFontColor);
         sessions.set(target.id, session);
         targetFailures.delete(target.id);
         console.log(`[codex-meter] injected target ${target.id}`);
@@ -484,6 +510,7 @@ async function runWatch(options) {
             if (stopping) return;
             applyToSession(session, script)
               .then(() => applyQuotaToSession(session, latestQuota))
+              .then(() => applyFontColorToSession(session, latestFontColor))
               .catch((error) => {
                 console.error(`[codex-meter] reinject failed for ${target.id}: ${error.message}`);
               });

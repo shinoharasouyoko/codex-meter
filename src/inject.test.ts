@@ -6,6 +6,8 @@ import { probeSession } from "../src-tauri/resources/injector.mjs";
 interface InjectedState {
   timer?: unknown;
   setQuota: (quota: { status: string; percent: number | null; resetsAt: string | null }) => void;
+  getFontColor: () => string | null;
+  setFontColor: (color: string | null) => void;
   dispose: () => void;
 }
 
@@ -55,6 +57,14 @@ describe("title-bar quota injection", () => {
     expect(styleText).toMatch(/\.widget:hover \.date\s*\{[^}]*display:\s*inline/);
     expect(styleText).toContain("clip-path: inset(0 calc(100% - var(--battery-percent, 0%)) 0 0)");
     expect(styleText).toMatch(/:host\(\[data-theme="dark"\]\) \.battery-text\s*\{[^}]*color:\s*#fff/);
+
+    state.setFontColor("#aBc123");
+    expect(state.getFontColor()).toBe("#ABC123");
+    expect(host?.dataset.fontColor).toBe("custom");
+    expect(host?.style.getPropertyValue("--meter-font-color")).toBe("#ABC123");
+    state.setFontColor(null);
+    expect(state.getFontColor()).toBeNull();
+    expect(host?.dataset.fontColor).toBeUndefined();
 
     state.setQuota({
       status: "ok",

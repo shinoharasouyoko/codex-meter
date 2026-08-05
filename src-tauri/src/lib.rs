@@ -2,9 +2,10 @@ mod cdp;
 mod codex;
 mod models;
 
-use std::{process::Child, sync::Mutex, time::Duration};
+use std::{fs, path::PathBuf, process::Child, sync::Mutex, time::Duration};
 
 use models::InjectorQuotaUpdate;
+use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
@@ -13,7 +14,13 @@ use tauri::{
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 #[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO};
+use windows::Win32::{
+    Foundation::COLORREF,
+    UI::{
+        Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW},
+        WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO},
+    },
+};
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const ERROR_RETRY_BASE: Duration = Duration::from_secs(30);
@@ -23,6 +30,94 @@ struct AppState {
     client: reqwest::Client,
     fetch_lock: tokio::sync::Mutex<()>,
     injector_child: Mutex<Option<Child>>,
+    font_color: Mutex<Option<String>>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct DisplayPreferences {
+    font_color: Option<String>,
+}
+
+fn display_preferences_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| dir.join("CodexMeter").join("display.json"))
+}
+
+fn normalize_font_color(value: &str) -> Option<String> {
+    let value = value.trim();
+    let valid = value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit);
+    valid.then(|| format!("#{}", value[1..].to_ascii_uppercase()))
+}
+
+fn load_font_color() -> Option<String> {
+    let path = display_preferences_path()?;
+    let source = fs::read_to_string(path).ok()?;
+    let preferences: DisplayPreferences = serde_json::from_str(&source).ok()?;
+    preferences
+        .font_color
+        .as_deref()
+        .and_then(normalize_font_color)
+}
+
+fn save_font_color(color: Option<&str>) -> Result<(), String> {
+    let path = display_preferences_path().ok_or("无法定位 CodexMeter 配置目录")?;
+    let parent = path.parent().ok_or("无效的 CodexMeter 配置路径")?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建配置目录: {error}"))?;
+    let preferences = DisplayPreferences {
+        font_color: color.map(str::to_owned),
+    };
+    let content = serde_json::to_string(&preferences)
+        .map_err(|error| format!("无法序列化显示配置: {error}"))?;
+    fs::write(path, content).map_err(|error| format!("无法保存显示配置: {error}"))
+}
+
+#[cfg(windows)]
+fn colorref_from_hex(color: Option<&str>) -> COLORREF {
+    let color = color
+        .and_then(normalize_font_color)
+        .unwrap_or_else(|| "#FFFFFF".into());
+    let red = u32::from_str_radix(&color[1..3], 16).unwrap_or(255);
+    let green = u32::from_str_radix(&color[3..5], 16).unwrap_or(255);
+    let blue = u32::from_str_radix(&color[5..7], 16).unwrap_or(255);
+    COLORREF(red | (green << 8) | (blue << 16))
+}
+
+#[cfg(windows)]
+fn choose_font_color(initial: Option<&str>) -> Option<String> {
+    let mut custom_colors = [COLORREF::default(); 16];
+    let mut dialog = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        rgbResult: colorref_from_hex(initial),
+        lpCustColors: custom_colors.as_mut_ptr(),
+        Flags: CC_FULLOPEN | CC_RGBINIT,
+        ..Default::default()
+    };
+    if !unsafe { ChooseColorW(&mut dialog) }.as_bool() {
+        return None;
+    }
+    let value = dialog.rgbResult.0;
+    Some(format!(
+        "#{:02X}{:02X}{:02X}",
+        value & 0xff,
+        (value >> 8) & 0xff,
+        (value >> 16) & 0xff
+    ))
+}
+
+fn publish_font_color(app: &AppHandle, color: Option<String>) {
+    let message = serde_json::json!({ "type": "fontColor", "color": color }).to_string();
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let result = state
+        .injector_child
+        .lock()
+        .map_err(|_| "injector state is unavailable".to_string())
+        .and_then(|mut child| cdp::send_injector_message(&mut child, &message));
+    if let Err(error) = result {
+        eprintln!("[display] failed to publish font color: {error}");
+    }
 }
 
 async fn fetch_and_publish_quota(app: &AppHandle) -> bool {
@@ -86,6 +181,14 @@ fn start_quota_refresh_loop(app: AppHandle) {
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let refresh = MenuItem::with_id(app, "refresh", "立即刷新", true, None::<&str>)?;
+    let font_color = MenuItem::with_id(app, "font_color", "设置电量字体颜色…", true, None::<&str>)?;
+    let reset_font_color = MenuItem::with_id(
+        app,
+        "reset_font_color",
+        "恢复默认电量字体颜色",
+        true,
+        None::<&str>,
+    )?;
     let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(
         app,
@@ -96,7 +199,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&refresh, &autostart, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[&refresh, &font_color, &reset_font_color, &autostart, &quit],
+    )?;
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
         .tooltip("CodexMeter");
@@ -107,6 +213,34 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     builder
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "refresh" => request_quota_refresh(app),
+            "font_color" => {
+                let initial = app
+                    .try_state::<AppState>()
+                    .and_then(|state| state.font_color.lock().ok().and_then(|color| color.clone()));
+                #[cfg(windows)]
+                if let Some(color) = choose_font_color(initial.as_deref()) {
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if let Ok(mut stored) = state.font_color.lock() {
+                            *stored = Some(color.clone());
+                        }
+                    }
+                    if let Err(error) = save_font_color(Some(&color)) {
+                        eprintln!("[display] failed to save font color: {error}");
+                    }
+                    publish_font_color(app, Some(color));
+                }
+            }
+            "reset_font_color" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    if let Ok(mut stored) = state.font_color.lock() {
+                        *stored = None;
+                    }
+                }
+                if let Err(error) = save_font_color(None) {
+                    eprintln!("[display] failed to reset font color: {error}");
+                }
+                publish_font_color(app, None);
+            }
             "autostart" => {
                 let manager = app.autolaunch();
                 let enabled = manager.is_enabled().unwrap_or(false);
@@ -200,11 +334,15 @@ fn init_cdp(app: &AppHandle) -> bool {
         &session.browser_id,
     ) {
         Ok(child) => {
+            let font_color = app
+                .try_state::<AppState>()
+                .and_then(|state| state.font_color.lock().ok().and_then(|color| color.clone()));
             if let Some(state) = app.try_state::<AppState>() {
                 if let Ok(mut injector) = state.injector_child.lock() {
                     *injector = Some(child);
                 }
             }
+            publish_font_color(app, font_color);
             eprintln!(
                 "[cdp] injector started (port={}, browser-id={}, strategy={})",
                 session.port, session.browser_id, session.strategy
@@ -238,6 +376,7 @@ pub fn run() {
                 client,
                 fetch_lock: tokio::sync::Mutex::new(()),
                 injector_child: Mutex::new(None),
+                font_color: Mutex::new(load_font_color()),
             });
             setup_tray(app)?;
             if init_cdp(app.handle()) {
@@ -257,4 +396,17 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_font_color;
+
+    #[test]
+    fn normalizes_only_six_digit_hex_font_colors() {
+        assert_eq!(normalize_font_color(" #aBc123 "), Some("#ABC123".into()));
+        assert_eq!(normalize_font_color("#FFF"), None);
+        assert_eq!(normalize_font_color("rgb(255, 255, 255)"), None);
+        assert_eq!(normalize_font_color("#ABC12G"), None);
+    }
 }
