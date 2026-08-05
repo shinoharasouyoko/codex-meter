@@ -193,16 +193,32 @@ class CdpSession {
 }
 
 // --- Probe & inject ---
-async function probeSession(session) {
+export async function probeSession(session) {
   return session.evaluate(`(() => {
+    const genericCodexSurface = () => {
+      if (location.protocol !== 'app:') return false;
+      const main = document.querySelector('main, [role="main"]');
+      const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+      const branded = Boolean(document.querySelector(
+        '[data-testid="app-shell-header-context-menu-surface"]',
+      ));
+      return Boolean(main && input && branded);
+    };
     const markers = {
-      shell: Boolean(document.querySelector('main.main-surface')),
+      shell: Boolean(document.querySelector(
+        'main:is(.main-surface, [data-app-shell-main-surface], [class*="_MainContentSurface_"])',
+      )),
       sidebar: Boolean(document.querySelector('aside.app-shell-left-panel')),
       main: Boolean(document.querySelector('[role="main"]')),
+      settings: Boolean(document.querySelector('[data-settings-panel-slug="general-settings"]')) ||
+        Boolean(document.querySelector('input[name="appearance-theme"]')) ||
+        Boolean(document.querySelector('[data-testid="theme-preview"]')),
+      generic: genericCodexSurface(),
     };
     return {
       markers,
-      codex: location.protocol === 'app:' && (markers.shell || markers.main),
+      codex: location.protocol === 'app:' &&
+        ((markers.shell && markers.sidebar) || markers.settings || markers.main || markers.generic),
     };
   })()`);
 }

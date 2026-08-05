@@ -1,6 +1,6 @@
 (() => {
   const HOST_ID = "codex-meter-widget";
-  const VERSION = "0.3.0";
+  const VERSION = "0.4.0";
 
   const previous = window.__CODEX_METER_STATE__;
   if (typeof previous?.dispose === "function") {
@@ -88,29 +88,36 @@
       transition: width 600ms cubic-bezier(0.25, 0.1, 0.25, 1),
                   background-color 400ms ease;
     }
-    .battery-text {
+    .battery-text,
+    .battery-text-fill {
       position: relative;
       z-index: 1;
-      font-size: 12px;
-      font-weight: 650;
+      position: absolute;
+      inset: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 750;
       font-variant-numeric: tabular-nums;
-      letter-spacing: -0.1px;
+      letter-spacing: 0;
       line-height: 1;
-      color: #fff;
-      text-shadow: 0 0 2px rgba(0,0,0,0.25);
+      text-shadow: none;
       transform: translateY(-0.5px);
     }
-    .battery[data-level="warning"] .battery-text {
-      color: rgba(0, 0, 0, 0.82);
-      text-shadow: none;
+    .battery-text {
+      color: #1a1c1f;
     }
-    .battery[data-level="critical"] .battery-text {
-      color: #666;
-      text-shadow: none;
+    .battery-text-fill {
+      z-index: 2;
+      color: #102a1a;
+      clip-path: inset(0 calc(100% - var(--battery-percent, 0%)) 0 0);
     }
-    .battery[data-level="unknown"] .battery-text {
-      color: var(--titlebar-text-color, currentColor);
-      text-shadow: none;
+    :host([data-theme="dark"]) .battery-text {
+      color: #fff;
+    }
+    .battery[data-level="unknown"] .battery-text-fill {
+      display: none;
     }
 
     /* --- Date (hidden until hover) --- */
@@ -186,15 +193,39 @@
     return `${date.getMonth() + 1}月${date.getDate()}日`;
   }
 
+  function buttonLabel(button) {
+    return (
+      button.getAttribute("aria-label") ||
+      button.getAttribute("title") ||
+      button.textContent ||
+      ""
+    ).replace(/\s+/g, " ").trim();
+  }
+
+  function isHelpButton(button) {
+    return /^(?:help|support|帮助|帮助[与和]反馈)$/i.test(buttonLabel(button));
+  }
+
+  function findAnchorIn(container) {
+    if (!container) return null;
+    const buttons = Array.from(container.querySelectorAll('button, [role="button"]'));
+    return buttons.find(isHelpButton) ||
+      buttons.find((button) => button.getAttribute("aria-haspopup") === "menu") ||
+      buttons.at(-1) || null;
+  }
+
   function findTitlebarAnchor() {
-    const titlebar = document.querySelector('[class~="group/application-menu-top-bar"]');
+    // Old Codex used a Tailwind-style class; current 26.727 builds use a CSS
+    // Modules class. Both identify the native application menu, unlike the
+    // app-shell header, which is the title of the active conversation.
+    const titlebar = document.querySelector(
+      ':is([class~="group/application-menu-top-bar"], [class*="_ApplicationMenuTopBar_"])',
+    );
     if (!titlebar) return null;
 
-    const menuButtons = Array.from(titlebar.querySelectorAll('button[aria-haspopup="menu"]'));
-    return menuButtons.find((button) => {
-      const label = (button.getAttribute("aria-label") || button.textContent || "").trim();
-      return label === "帮助" || label.toLowerCase() === "help";
-    }) || menuButtons.at(-1) || null;
+    // The menu bar keeps the quota widget beside File/Edit/View/Help, rather
+    // than beside navigation buttons that share the same native title bar.
+    return findAnchorIn(titlebar.querySelector('[role="menubar"]') || titlebar);
   }
 
   function syncTitlebarStyles(anchor) {
@@ -245,11 +276,16 @@
   const batteryText = document.createElement("span");
   batteryText.className = "battery-text";
 
+  const batteryTextFill = document.createElement("span");
+  batteryTextFill.className = "battery-text-fill";
+  batteryTextFill.setAttribute("aria-hidden", "true");
+
   const batteryTip = document.createElement("div");
   batteryTip.className = "battery-tip";
 
   batteryBody.appendChild(batteryFill);
   batteryBody.appendChild(batteryText);
+  batteryBody.appendChild(batteryTextFill);
   battery.appendChild(batteryBody);
   battery.appendChild(batteryTip);
 
@@ -272,12 +308,16 @@
       const normalized = clamp(Math.round(percent), 0, 100);
       batteryFill.style.width = `${normalized}%`;
       batteryFill.style.backgroundColor = fillColor(normalized);
+      battery.style.setProperty("--battery-percent", `${normalized}%`);
       batteryText.textContent = String(normalized);
+      batteryTextFill.textContent = String(normalized);
       battery.dataset.level = fillLevel(normalized);
     } else {
       batteryFill.style.width = "0%";
       batteryFill.style.backgroundColor = "transparent";
+      battery.style.setProperty("--battery-percent", "0%");
       batteryText.textContent = "--";
+      batteryTextFill.textContent = "--";
       battery.dataset.level = "unknown";
     }
 
