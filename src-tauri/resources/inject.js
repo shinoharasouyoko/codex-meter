@@ -28,6 +28,7 @@
   const cssText = `
     :host {
       all: initial;
+      --meter-default-font-color: #767680;
       display: inline-flex;
       align-self: center;
       flex: 0 0 auto;
@@ -111,15 +112,12 @@
       transform: translateY(-0.5px);
     }
     .battery-text {
-      color: #1a1c1f;
+      color: var(--meter-default-font-color);
     }
     .battery-text-fill {
       z-index: 2;
-      color: #102a1a;
+      color: var(--meter-default-font-color);
       clip-path: inset(0 calc(100% - var(--battery-percent, 0%)) 0 0);
-    }
-    :host([data-theme="dark"]) .battery-text {
-      color: #fff;
     }
     :host([data-font-color]) :is(.battery-text, .battery-text-fill) {
       color: var(--meter-font-color);

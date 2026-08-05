@@ -56,7 +56,8 @@ describe("title-bar quota injection", () => {
     expect(styleText).toMatch(/\.date\s*\{[^}]*display:\s*none/);
     expect(styleText).toMatch(/\.widget:hover \.date\s*\{[^}]*display:\s*inline/);
     expect(styleText).toContain("clip-path: inset(0 calc(100% - var(--battery-percent, 0%)) 0 0)");
-    expect(styleText).toMatch(/:host\(\[data-theme="dark"\]\) \.battery-text\s*\{[^}]*color:\s*#fff/);
+    expect(styleText).toContain("--meter-default-font-color: #767680");
+    expect(styleText).toMatch(/\.battery-text\s*\{[^}]*color:\s*var\(--meter-default-font-color\)/);
 
     state.setFontColor("#aBc123");
     expect(state.getFontColor()).toBe("#ABC123");
