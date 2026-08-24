@@ -2,7 +2,16 @@ mod cdp;
 mod codex;
 mod models;
 
-use std::{fs, path::PathBuf, process::Child, sync::Mutex, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    process::Child,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    time::Duration,
+};
 
 use models::InjectorQuotaUpdate;
 use serde::{Deserialize, Serialize};
@@ -18,7 +27,7 @@ use windows::Win32::{
     Foundation::COLORREF,
     UI::{
         Controls::Dialogs::{ChooseColorW, CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW},
-        WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONQUESTION, MB_YESNO},
+        WindowsAndMessaging::{MessageBoxW, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO},
     },
 };
 
@@ -31,6 +40,7 @@ struct AppState {
     fetch_lock: tokio::sync::Mutex<()>,
     injector_child: Mutex<Option<Child>>,
     font_color: Mutex<Option<String>>,
+    restart_in_progress: AtomicBool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -181,6 +191,7 @@ fn start_quota_refresh_loop(app: AppHandle) {
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let refresh = MenuItem::with_id(app, "refresh", "立即刷新", true, None::<&str>)?;
+    let restart_codex = MenuItem::with_id(app, "restart_codex", "重启 Codex", true, None::<&str>)?;
     let font_color = MenuItem::with_id(app, "font_color", "设置电量字体颜色…", true, None::<&str>)?;
     let reset_font_color = MenuItem::with_id(
         app,
@@ -201,7 +212,14 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&refresh, &font_color, &reset_font_color, &autostart, &quit],
+        &[
+            &refresh,
+            &restart_codex,
+            &font_color,
+            &reset_font_color,
+            &autostart,
+            &quit,
+        ],
     )?;
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
@@ -210,9 +228,11 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         builder = builder.icon(icon.clone());
     }
     let autostart_menu = autostart.clone();
+    let restart_menu = restart_codex.clone();
     builder
         .on_menu_event(move |app, event| match event.id.as_ref() {
             "refresh" => request_quota_refresh(app),
+            "restart_codex" => request_codex_restart(app, &restart_menu),
             "font_color" => {
                 let initial = app
                     .try_state::<AppState>()
@@ -261,6 +281,135 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+fn attach_injector(app: &AppHandle, session: &cdp::CdpSession) -> Result<(), String> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "CodexMeter state is unavailable".to_string())?;
+    let font_color = state
+        .font_color
+        .lock()
+        .map_err(|_| "font color state is unavailable".to_string())?
+        .clone();
+    let node_exe = cdp::find_node_exe()?;
+    let injector_mjs = cdp::resolve_injector_mjs()?;
+    let mut child = Some(cdp::spawn_injector(
+        &node_exe,
+        &injector_mjs,
+        session.port,
+        &session.browser_id,
+    )?);
+    let result = state
+        .injector_child
+        .lock()
+        .map_err(|_| "injector state is unavailable".to_string())
+        .map(|mut injector| {
+            *injector = child.take();
+        });
+    if let Err(error) = result {
+        cdp::kill_injector(&mut child);
+        return Err(error);
+    }
+    publish_font_color(app, font_color);
+    eprintln!(
+        "[cdp] injector started (port={}, browser-id={}, strategy={})",
+        session.port, session.browser_id, session.strategy
+    );
+    Ok(())
+}
+
+#[cfg(windows)]
+fn confirm_codex_restart() -> bool {
+    let text: Vec<u16> =
+        "重启 Codex 将关闭当前窗口并重新打开，正在执行的操作可能被中断。\n\n是否继续？"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+    let caption: Vec<u16> = "CodexMeter"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let result = unsafe {
+        MessageBoxW(
+            None,
+            windows::core::PCWSTR(text.as_ptr()),
+            windows::core::PCWSTR(caption.as_ptr()),
+            MB_YESNO | MB_ICONQUESTION,
+        )
+    };
+    result == IDYES
+}
+
+#[cfg(windows)]
+fn report_codex_restart_error(error: &str) {
+    let text: Vec<u16> = format!("重启 Codex 失败：{error}")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let caption: Vec<u16> = "CodexMeter"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            windows::core::PCWSTR(text.as_ptr()),
+            windows::core::PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn restart_codex(app: &AppHandle) -> Result<(), String> {
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "CodexMeter state is unavailable".to_string())?;
+    if let Ok(mut injector) = state.injector_child.lock() {
+        cdp::kill_injector(&mut injector);
+    } else {
+        return Err("injector state is unavailable".to_string());
+    }
+
+    let session = cdp::restart_codex_cdp(cdp::DEFAULT_CDP_PORT)?;
+    attach_injector(app, &session)?;
+    request_quota_refresh(app);
+    Ok(())
+}
+
+#[cfg(windows)]
+fn request_codex_restart(app: &AppHandle, restart_menu: &MenuItem<tauri::Wry>) {
+    if !confirm_codex_restart() {
+        return;
+    }
+    let Some(state) = app.try_state::<AppState>() else {
+        report_codex_restart_error("CodexMeter state is unavailable");
+        return;
+    };
+    if state.restart_in_progress.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _ = restart_menu.set_enabled(false);
+    let worker_app = app.clone();
+    let callback_app = app.clone();
+    let restart_menu = restart_menu.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = tauri::async_runtime::spawn_blocking(move || restart_codex(&worker_app)).await;
+        if let Some(state) = callback_app.try_state::<AppState>() {
+            state.restart_in_progress.store(false, Ordering::Release);
+        }
+        let _ = restart_menu.set_enabled(true);
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => report_codex_restart_error(&error),
+            Err(error) => report_codex_restart_error(&format!("后台任务失败：{error}")),
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn request_codex_restart(_app: &AppHandle, _restart_menu: &MenuItem<tauri::Wry>) {
+    eprintln!("[cdp] Codex restart is only supported on Windows");
 }
 
 /// Initialize the verified local CDP connection and injector process.
@@ -312,48 +461,11 @@ fn init_cdp(app: &AppHandle) -> bool {
         }
     };
 
-    let node_exe = match cdp::find_node_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("[cdp] {error}");
-            return false;
-        }
-    };
-    let injector_mjs = match cdp::resolve_injector_mjs() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("[cdp] {error}");
-            return false;
-        }
-    };
-
-    match cdp::spawn_injector(
-        &node_exe,
-        &injector_mjs,
-        session.port,
-        &session.browser_id,
-    ) {
-        Ok(child) => {
-            let font_color = app
-                .try_state::<AppState>()
-                .and_then(|state| state.font_color.lock().ok().and_then(|color| color.clone()));
-            if let Some(state) = app.try_state::<AppState>() {
-                if let Ok(mut injector) = state.injector_child.lock() {
-                    *injector = Some(child);
-                }
-            }
-            publish_font_color(app, font_color);
-            eprintln!(
-                "[cdp] injector started (port={}, browser-id={}, strategy={})",
-                session.port, session.browser_id, session.strategy
-            );
-            true
-        }
-        Err(error) => {
-            eprintln!("[cdp] {error}");
-            false
-        }
+    if let Err(error) = attach_injector(app, &session) {
+        eprintln!("[cdp] {error}");
+        return false;
     }
+    true
 }
 
 pub fn run() {
@@ -377,6 +489,7 @@ pub fn run() {
                 fetch_lock: tokio::sync::Mutex::new(()),
                 injector_child: Mutex::new(None),
                 font_color: Mutex::new(load_font_color()),
+                restart_in_progress: AtomicBool::new(false),
             });
             setup_tray(app)?;
             if init_cdp(app.handle()) {

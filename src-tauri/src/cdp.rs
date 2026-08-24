@@ -363,7 +363,10 @@ fn parse_launch_result_json(json_line: &str) -> Result<CdpSession, String> {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown error");
-        return Err(format!("{} ({code}): {message}", map_launch_failure_code(code)));
+        return Err(format!(
+            "{} ({code}): {message}",
+            map_launch_failure_code(code)
+        ));
     }
 
     let port = value
@@ -401,12 +404,63 @@ fn run_launch_codex_cdp(
     preferred_port: u16,
     skip_launch: bool,
     allow_port_scan: bool,
+    force_restart: bool,
 ) -> Result<CdpSession, String> {
     let script = resource_path("launch-codex-cdp.ps1")?;
     let script_path = script
         .to_str()
         .ok_or_else(|| "launch-codex-cdp.ps1 路径无效".to_string())?;
 
+    let args = build_launch_args(
+        script_path,
+        install,
+        preferred_port,
+        skip_launch,
+        allow_port_scan,
+        force_restart,
+    );
+
+    eprintln!(
+        "[cdp] launching Codex {} ({}) via {} (preferred port {preferred_port}, skip_launch={skip_launch}, force_restart={force_restart})",
+        install.version,
+        install.app_user_model_id,
+        install.executable
+    );
+
+    let output = hidden_powershell()
+        .args(&args)
+        .output()
+        .map_err(|e| format!("PowerShell 调用失败: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stdout.lines().chain(stderr.lines()) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('{') {
+            continue;
+        }
+        eprintln!("[cdp:ps] {trimmed}");
+    }
+
+    if let Some(json_line) = first_json_object(&stdout) {
+        return parse_launch_result_json(json_line);
+    }
+
+    if !output.status.success() {
+        let detail = powershell_error_message(&output.stderr, "启动 Codex CDP 失败");
+        return Err(format!("启动 Codex CDP 失败: {detail}"));
+    }
+    Err("launch-codex-cdp.ps1 未返回 JSON".into())
+}
+
+fn build_launch_args(
+    script_path: &str,
+    install: &CodexInstall,
+    preferred_port: u16,
+    skip_launch: bool,
+    allow_port_scan: bool,
+    force_restart: bool,
+) -> Vec<String> {
     let mut args = vec![
         "-NoProfile".to_string(),
         "-ExecutionPolicy".to_string(),
@@ -440,36 +494,10 @@ fn run_launch_codex_cdp(
     if skip_launch {
         args.push("-SkipLaunch".to_string());
     }
-
-    eprintln!(
-        "[cdp] launching Codex {} ({}) via {} (preferred port {preferred_port}, skip_launch={skip_launch})",
-        install.version, install.app_user_model_id, install.executable
-    );
-
-    let output = hidden_powershell()
-        .args(&args)
-        .output()
-        .map_err(|e| format!("PowerShell 调用失败: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    for line in stdout.lines().chain(stderr.lines()) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('{') {
-            continue;
-        }
-        eprintln!("[cdp:ps] {trimmed}");
+    if force_restart {
+        args.push("-ForceRestart".to_string());
     }
-
-    if let Some(json_line) = first_json_object(&stdout) {
-        return parse_launch_result_json(json_line);
-    }
-
-    if !output.status.success() {
-        let detail = powershell_error_message(&output.stderr, "启动 Codex CDP 失败");
-        return Err(format!("启动 Codex CDP 失败: {detail}"));
-    }
-    Err("launch-codex-cdp.ps1 未返回 JSON".into())
+    args
 }
 
 /// Probe whether a verified CDP session already exists without restarting Codex.
@@ -478,7 +506,7 @@ pub fn probe_codex_cdp(preferred_port: u16) -> Result<CdpSession, String> {
     let install = resolve_codex_install()?;
     let persisted = read_persisted_state();
     let port = persisted.port.unwrap_or(preferred_port);
-    run_launch_codex_cdp(&install, port, true, true)
+    run_launch_codex_cdp(&install, port, true, true, false)
 }
 
 /// Ensure Codex exposes a verified loopback CDP endpoint (reuse, launch, or port-scan).
@@ -492,7 +520,7 @@ pub fn ensure_codex_cdp(preferred_port: u16, allow_restart: bool) -> Result<CdpS
     // alternate CDP from a previous conflict can still be reused.
     let probe_port = persisted.port.unwrap_or(preferred_port);
 
-    match run_launch_codex_cdp(&install, probe_port, true, true) {
+    match run_launch_codex_cdp(&install, probe_port, true, true, false) {
         Ok(session) => {
             eprintln!(
                 "[cdp] reused existing CDP (port={}, browser-id={}, strategy={})",
@@ -510,7 +538,7 @@ pub fn ensure_codex_cdp(preferred_port: u16, allow_restart: bool) -> Result<CdpS
     }
 
     // Launch always starts from the default preferred port and scans +100 on conflict.
-    let session = run_launch_codex_cdp(&install, preferred_port, false, true)?;
+    let session = run_launch_codex_cdp(&install, preferred_port, false, true, false)?;
     if session.port != preferred_port {
         eprintln!(
             "[cdp] preferred port {preferred_port} was busy; selected {}",
@@ -519,6 +547,27 @@ pub fn ensure_codex_cdp(preferred_port: u16, allow_restart: bool) -> Result<CdpS
     }
     eprintln!(
         "[cdp] CDP ready (port={}, browser-id={}, strategy={})",
+        session.port, session.browser_id, session.strategy
+    );
+    write_persisted_state(&session);
+    Ok(session)
+}
+
+/// Restart Codex with a verified loopback CDP endpoint.
+///
+/// Unlike `ensure_codex_cdp`, this always skips reuse probing so the current
+/// Codex process is closed and launched again with CDP arguments.
+pub fn restart_codex_cdp(preferred_port: u16) -> Result<CdpSession, String> {
+    let install = resolve_codex_install()?;
+    let session = run_launch_codex_cdp(&install, preferred_port, false, true, true)?;
+    if session.port != preferred_port {
+        eprintln!(
+            "[cdp] preferred port {preferred_port} was busy; selected {}",
+            session.port
+        );
+    }
+    eprintln!(
+        "[cdp] Codex restarted with CDP (port={}, browser-id={}, strategy={})",
         session.port, session.browser_id, session.strategy
     );
     write_persisted_state(&session);
@@ -564,10 +613,7 @@ pub fn find_node_exe() -> Result<PathBuf, String> {
         }
     }
 
-    Err(
-        "Node.js 未找到。请安装 Node.js 并确保其在 PATH 中，或使用带内置 Node 的安装包。"
-            .into(),
-    )
+    Err("Node.js 未找到。请安装 Node.js 并确保其在 PATH 中，或使用带内置 Node 的安装包。".into())
 }
 
 /// Resolve the path to the injector.mjs resource file.
@@ -698,6 +744,23 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("port-unavailable"));
         assert!(err.contains("调试端口"));
+    }
+
+    #[test]
+    fn force_restart_arguments_skip_reuse_probe_without_skip_launch() {
+        let install = CodexInstall {
+            app_user_model_id: "OpenAI.Codex_test!App".into(),
+            package_root: r"C:\pkg".into(),
+            executable: r"C:\pkg\app\ChatGPT.exe".into(),
+            version: "1.0.0".into(),
+            package_name: Some("OpenAI.Codex".into()),
+            package_family_name: Some("OpenAI.Codex_test".into()),
+        };
+        let args = build_launch_args("launch-codex-cdp.ps1", &install, 9335, false, true, true);
+
+        assert!(args.iter().any(|arg| arg == "-AllowPortScan"));
+        assert!(args.iter().any(|arg| arg == "-ForceRestart"));
+        assert!(!args.iter().any(|arg| arg == "-SkipLaunch"));
     }
 
     #[test]

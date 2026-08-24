@@ -16,6 +16,7 @@ param(
   [int[]]$PreserveProcessIds = @(),
   [switch]$AllowPortScan,
   [switch]$SkipLaunch,
+  [switch]$ForceRestart,
   [int]$CdpTimeoutSeconds = 45
 )
 
@@ -793,25 +794,27 @@ Write-Host "[codex-meter] resolved $($codex.PackageName) $($codex.Version)"
 # Probe PreferredPort and any currently-listening ports in +100 for verified CDP.
 $portCandidates = @(Get-CodexMeterPortProbeList -PreferredPort $PreferredPort -ScanRange:$AllowPortScan)
 Write-Host "[codex-meter] probing ports: $($portCandidates -join ',')"
-$codexAlreadyRunning = ((Get-CodexMeterCodexProcesses -Codex $codex).Count -gt 0)
-foreach ($probePort in $portCandidates) {
-  # Store apps often leave OwningProcess=0 on the CDP listener. If Codex is
-  # already running for this package (and the owner is not a known foreign
-  # browser), accept the loopback /json/version endpoint for reuse.
-  $existing = Get-CodexMeterVerifiedCdpIdentity -Port $probePort -Codex $codex `
-    -AllowUnownedLoopback:$codexAlreadyRunning
-  if ($null -ne $existing) {
-    Write-CodexMeterResult @{
-      ok = $true
-      port = $probePort
-      browserId = $existing.BrowserId
-      strategy = 'reused-existing'
-      packageName = $codex.PackageName
-      version = $codex.Version
-      packageFamilyName = $codex.PackageFamilyName
-      owned = $existing.Owned
+if (-not $ForceRestart) {
+  $codexAlreadyRunning = ((Get-CodexMeterCodexProcesses -Codex $codex).Count -gt 0)
+  foreach ($probePort in $portCandidates) {
+    # Store apps often leave OwningProcess=0 on the CDP listener. If Codex is
+    # already running for this package (and the owner is not a known foreign
+    # browser), accept the loopback /json/version endpoint for reuse.
+    $existing = Get-CodexMeterVerifiedCdpIdentity -Port $probePort -Codex $codex `
+      -AllowUnownedLoopback:$codexAlreadyRunning
+    if ($null -ne $existing) {
+      Write-CodexMeterResult @{
+        ok = $true
+        port = $probePort
+        browserId = $existing.BrowserId
+        strategy = 'reused-existing'
+        packageName = $codex.PackageName
+        version = $codex.Version
+        packageFamilyName = $codex.PackageFamilyName
+        owned = $existing.Owned
+      }
+      exit 0
     }
-    exit 0
   }
 }
 
