@@ -2,6 +2,8 @@
 
 CodexMeter 是一个轻量级 Windows 托盘工具，通过本机 CDP 将额度电量组件注入 Codex Desktop 标题栏。它不会修改官方安装包，也不需要额外登录；额度查询直接复用本机已登录的 Codex 会话。
 
+当前发布版本：`0.4.2`
+
 ![效果预览](docs/175329643.png)
 
 ## 当前功能
@@ -10,7 +12,8 @@ CodexMeter 是一个轻量级 Windows 托盘工具，通过本机 CDP 将额度�
 - 展示真实额度数据，不包含 Mock 数据或随机刷新逻辑。
 - 优先展示周额度；接口未提供周额度时回退到短周期额度。
 - 额度低于 50% 显示黄色，低于 20% 显示红色，其余显示绿色。
-- 后台定时刷新；托盘菜单支持立即刷新、开机启动和退出。
+- 后台每 5 分钟刷新，失败时自动退避重试；托盘菜单支持立即刷新、重启 Codex、开机启动和退出。
+- 如果手动关闭并重新打开 Codex 后额度条失效，可右键托盘选择“重启 Codex”。确认后 CodexMeter 会关闭当前 Codex、以 CDP 模式重新打开，并自动恢复额度组件；无需重启 CodexMeter。
 - 从托盘退出时清理已注入的标题栏组件。
 
 ## 工作方式
@@ -20,12 +23,14 @@ CodexMeter 是一个轻量级 Windows 托盘工具，通过本机 CDP 将额度�
 3. 注入器连接 Codex Desktop，并把电量组件和最新额度同步到标题栏。
 4. 页面重新加载或新建窗口时，注入器会自动恢复组件和最新数据。
 
+CodexMeter 只使用 `127.0.0.1` 上的 CDP。默认端口为 `9335`；端口被占用时会在 `9335–9435` 范围内选择可用端口。托盘中的“重启 Codex”会强制重新建立这条本机 CDP 会话，并重新挂载注入器。
+
 额度不可用时显示 `--`，不会猜测或伪造数据。
 
 ## 使用要求
 
 - Windows
-- 已安装并登录 Codex Desktop
+- 已安装并登录 Codex Desktop（Microsoft Store 稳定版或 Beta 版）
 - **精简安装包**需要本机已安装 Node.js；**内置 Node 安装包**不需要
 - 从源码开发或构建时需要 Node.js、Rust MSVC 工具链和 Visual Studio Build Tools 的 **Desktop development with C++** 工作负载
 
@@ -34,8 +39,12 @@ CodexMeter 是一个轻量级 Windows 托盘工具，通过本机 CDP 将额度�
 ```powershell
 npm install
 npm test
+npm run test:cdp
 npm run build
 npm run tauri -- dev
+
+# Rust 单元测试
+cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 
 ## 构建
@@ -52,11 +61,12 @@ npm run package:windows
 
 - 精简版：`src-tauri/target/release/bundle/msi/`、`nsis/`（需系统 Node）
 - 内置 Node 版：`src-tauri/target/release/bundle/with-node/msi/`、`with-node/nsis/`（文件名带 `-with-node`，约多 ~87MB）
+
 ## 关键文件
 
 - `src-tauri/src/codex.rs`：读取登录状态并查询真实额度。
 - `src-tauri/src/models.rs`：将接口数据映射为注入器消息。
-- `src-tauri/src/cdp.rs`：`ensure_codex_cdp`、状态持久化、注入器进程管理。
+- `src-tauri/src/cdp.rs`：`ensure_codex_cdp` / `restart_codex_cdp`、状态持久化、注入器进程管理。
 - `src-tauri/resources/resolve-codex-install.ps1`：解析 Store 包身份（稳定版 / Beta）。
 - `src-tauri/resources/launch-codex-cdp.ps1`：COM 启动、owl 回退、端口扫描（9335–9435）、CDP 校验。
 - `src-tauri/resources/injector.mjs`：连接 Codex Desktop 并分发额度数据。
