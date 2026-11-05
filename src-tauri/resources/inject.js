@@ -1,6 +1,6 @@
 (() => {
-  const HOST_ID = "codex-meter-widget";
-  const VERSION = "0.4.2";
+  const HOST_ID = "myco-meter-widget";
+  const VERSION = "0.4.9";
 
   const previous = window.__CODEX_METER_STATE__;
   if (typeof previous?.dispose === "function") {
@@ -15,8 +15,14 @@
 
   let currentQuota = {
     status: "loading",
-    percent: null,
-    resetsAt: null,
+    shortWindow: null,
+    weeklyWindow: null,
+  };
+  let currentWeather = {
+    status: "loading",
+    current: null,
+    nextHour: null,
+    tomorrow: null,
   };
   const HEX_COLOR = /^#[0-9a-f]{6}$/i;
   let fontColor = typeof previous?.getFontColor === "function"
@@ -38,6 +44,13 @@
       font-family: var(--titlebar-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
       -webkit-font-smoothing: antialiased;
       -webkit-app-region: no-drag;
+    }
+    :host([data-mount="shell-overlay"]) {
+      position: fixed;
+      top: 8px;
+      left: 50%;
+      z-index: 2147483647;
+      transform: translateX(-50%);
     }
     .widget {
       box-sizing: border-box;
@@ -126,19 +139,57 @@
       display: none;
     }
 
-    /* --- Date (hidden until hover) --- */
-    .date {
+    /* --- Short-window reset time --- */
+    .reset-time {
       font-family: var(--titlebar-font-family, inherit);
-      font-size: var(--titlebar-font-size, 14px);
-      font-weight: var(--titlebar-font-weight, 400);
-      letter-spacing: normal;
-      line-height: var(--titlebar-line-height, 14px);
-      color: var(--titlebar-text-color, currentColor);
+      font-size: 11px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      color: var(--meter-default-font-color);
       white-space: nowrap;
-      display: none;
     }
-    .widget:hover .date {
-      display: inline;
+    .quota-label,
+    .weekly-value {
+      font-family: var(--titlebar-font-family, inherit);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .quota-label {
+      color: var(--meter-default-font-color);
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .quota-separator {
+      width: 1px;
+      height: 13px;
+      margin: 0 1px;
+      background: color-mix(in srgb, var(--titlebar-text-color, currentColor) 25%, transparent);
+    }
+    .weekly-value {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--fill-green);
+    }
+    .weekly-value[data-level="warning"] { color: var(--fill-yellow); }
+    .weekly-value[data-level="critical"] { color: var(--fill-red); }
+    .weekly-value[data-level="unknown"] { color: var(--meter-default-font-color); }
+
+    /* --- Weather --- */
+    .weather {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin-left: 50px;
+      color: var(--meter-default-font-color);
+      font-family: var(--titlebar-font-family, inherit);
+      font-size: 11px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .weather-value { font-variant-numeric: tabular-nums; }
+    .weather[data-status="unavailable"] { opacity: 0.8; }
+    @media (max-width: 900px) {
+      .weather { display: none; }
     }
 
     /* --- Theme: dark (default) --- */
@@ -192,6 +243,13 @@
     return "normal";
   }
 
+  function formatResetTime(value) {
+    if (typeof value !== "string" || !value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+
   function formatResetDate(value) {
     if (typeof value !== "string" || !value) return "";
     const date = new Date(value);
@@ -234,6 +292,36 @@
     return findAnchorIn(titlebar.querySelector('[role="menubar"]') || titlebar);
   }
 
+  function findShellMountRoot() {
+    const root = document.getElementById("root");
+    if (!root) return null;
+
+    // Codex 26.1029 replaced its native menu with the floating controls shell.
+    // Mounting on its stable application root keeps the meter away from chat headers.
+    return root.querySelector(':scope > main > section [class*="controls-"]') ? root : null;
+  }
+
+  function findWorkspaceShellMountRoot() {
+    const root = document.getElementById("root");
+    const main = root?.querySelector('main.no-drag') || root?.querySelector(':scope > main');
+    if (!main) return null;
+
+    // Current Codex workspace windows have a native draggable toolbar instead
+    // of floating controls. Require both the workspace sidebar and prompt so
+    // this cannot match an active conversation header.
+    const toolbar = main.querySelector(':scope > header.draggable');
+    const sidebar = main.querySelector('aside');
+    const input = main.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+    return toolbar && (main.classList.contains("no-drag") || (sidebar && input)) ? root : null;
+  }
+
+  function findTrustedCodexWebViewMountRoot() {
+    if (location.origin !== "https://chatgpt.com") return null;
+    const header = document.querySelector("header.draggable");
+    const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+    return header && input ? document.body : null;
+  }
+
   function syncTitlebarStyles(anchor) {
     const style = getComputedStyle(anchor);
     host.style.setProperty("--titlebar-text-color", style.color);
@@ -246,12 +334,23 @@
   function mountInTitlebar() {
     if (disposed) return false;
     const anchor = findTitlebarAnchor();
-    if (!anchor) return false;
-
-    if (host.parentElement !== anchor.parentElement || host.previousElementSibling !== anchor) {
-      anchor.insertAdjacentElement("afterend", host);
+    if (anchor) {
+      if (host.parentElement !== anchor.parentElement || host.previousElementSibling !== anchor) {
+        anchor.insertAdjacentElement("afterend", host);
+      }
+      delete host.dataset.mount;
+      syncTitlebarStyles(anchor);
+      return true;
     }
-    syncTitlebarStyles(anchor);
+
+    const shellRoot = findShellMountRoot() ||
+      findWorkspaceShellMountRoot() || findTrustedCodexWebViewMountRoot();
+    if (!shellRoot) return false;
+    if (host.parentElement !== shellRoot) {
+      shellRoot.appendChild(host);
+    }
+    host.dataset.mount = "shell-overlay";
+    syncTitlebarStyles(shellRoot);
     return true;
   }
 
@@ -306,12 +405,43 @@
   battery.appendChild(batteryBody);
   battery.appendChild(batteryTip);
 
-  // Date
-  const dateEl = document.createElement("span");
-  dateEl.className = "date";
+  // Short-window reset time
+  const resetTimeEl = document.createElement("span");
+  resetTimeEl.className = "reset-time";
 
+  const shortLabel = document.createElement("span");
+  shortLabel.className = "quota-label";
+  shortLabel.textContent = "5小时";
+
+  const separator = document.createElement("span");
+  separator.className = "quota-separator";
+
+  const weeklyLabel = document.createElement("span");
+  weeklyLabel.className = "quota-label";
+  weeklyLabel.textContent = "本周";
+
+  const weeklyValue = document.createElement("span");
+  weeklyValue.className = "weekly-value";
+
+  const weather = document.createElement("span");
+  weather.className = "weather";
+  const currentWeatherEl = document.createElement("span");
+  currentWeatherEl.className = "weather-value";
+  const nextWeatherEl = document.createElement("span");
+  nextWeatherEl.className = "weather-value";
+    const tomorrowWeatherEl = document.createElement("span");
+    tomorrowWeatherEl.className = "weather-value";
+  weather.appendChild(currentWeatherEl);
+  weather.appendChild(nextWeatherEl);
+    weather.appendChild(tomorrowWeatherEl);
+
+  widget.appendChild(shortLabel);
   widget.appendChild(battery);
-  widget.appendChild(dateEl);
+  widget.appendChild(resetTimeEl);
+  widget.appendChild(separator);
+  widget.appendChild(weeklyLabel);
+  widget.appendChild(weeklyValue);
+  widget.appendChild(weather);
   shadow.appendChild(styleNode);
   shadow.appendChild(widget);
   setFontColor(fontColor);
@@ -320,7 +450,7 @@
   // --- Update ---
   function update() {
     if (disposed) return;
-    const percent = currentQuota.percent;
+    const percent = currentQuota.shortWindow?.percent;
     const available = Number.isFinite(percent);
     if (available) {
       const normalized = clamp(Math.round(percent), 0, 100);
@@ -339,20 +469,78 @@
       battery.dataset.level = "unknown";
     }
 
-    const resetDate = available ? formatResetDate(currentQuota.resetsAt) : "";
-    dateEl.textContent = resetDate;
-    dateEl.hidden = !resetDate;
+    const resetTime = available ? formatResetTime(currentQuota.shortWindow?.resetsAt) : "";
+    resetTimeEl.textContent = resetTime || "--:--";
+    const weeklyPercent = currentQuota.weeklyWindow?.percent;
+    const weeklyAvailable = Number.isFinite(weeklyPercent);
+    const normalizedWeekly = weeklyAvailable ? clamp(Math.round(weeklyPercent), 0, 100) : null;
+    weeklyValue.textContent = normalizedWeekly === null ? "--" : `${normalizedWeekly}%`;
+    weeklyValue.dataset.level = normalizedWeekly === null ? "unknown" : fillLevel(normalizedWeekly);
+    const weeklyResetDate = weeklyAvailable ? formatResetDate(currentQuota.weeklyWindow?.resetsAt) : "";
+    weeklyValue.title = weeklyResetDate ? `重置日期：${weeklyResetDate}` : "额度暂不可用";
+    if (currentWeather.status === "ok" && currentWeather.current && currentWeather.nextHour && currentWeather.tomorrow) {
+      currentWeatherEl.textContent = `${currentWeather.current.emoji} ${currentWeather.current.description} ${Math.round(currentWeather.current.temperature)}°`;
+      nextWeatherEl.textContent = `1小时后 ${currentWeather.nextHour.emoji} ${currentWeather.nextHour.description} ${Math.round(currentWeather.nextHour.temperature)}°`;
+      tomorrowWeatherEl.textContent = `　|　明天 ${currentWeather.tomorrow.emoji} ${currentWeather.tomorrow.description} ${Math.round(currentWeather.tomorrow.temperatureMin)}°/${Math.round(currentWeather.tomorrow.temperatureMax)}°`;
+      weather.dataset.status = "ok";
+      weather.title = "天气数据：Open-Meteo；城市级 IP 定位";
+    } else {
+      currentWeatherEl.textContent = "天气暂不可用";
+      nextWeatherEl.textContent = "右键托盘后立即刷新";
+      tomorrowWeatherEl.textContent = "";
+      weather.dataset.status = "unavailable";
+      weather.title = "天气获取失败，可通过托盘立即刷新重试";
+    }
     host.dataset.status = currentQuota.status;
     host.setAttribute("data-theme", detectTheme());
     mountInTitlebar();
   }
 
   function setQuota(payload) {
-    const value = payload?.percent;
+    const normalizeWindow = (value) => {
+      const percent = value?.percent;
+      return typeof percent === "number" && Number.isFinite(percent)
+        ? {
+            percent: clamp(percent, 0, 100),
+            resetsAt: typeof value?.resetsAt === "string" ? value.resetsAt : null,
+          }
+        : null;
+    };
     currentQuota = {
       status: typeof payload?.status === "string" ? payload.status : "unavailable",
-      percent: typeof value === "number" && Number.isFinite(value) ? clamp(value, 0, 100) : null,
-      resetsAt: typeof payload?.resetsAt === "string" ? payload.resetsAt : null,
+      shortWindow: normalizeWindow(payload?.shortWindow),
+      weeklyWindow: normalizeWindow(payload?.weeklyWindow),
+    };
+    update();
+  }
+
+  function setWeather(payload) {
+    const normalize = (value) => (
+      typeof value?.emoji === "string" && value.emoji &&
+      typeof value?.description === "string" && value.description &&
+      typeof value?.temperature === "number" && Number.isFinite(value.temperature)
+    ) ? {
+      emoji: value.emoji,
+      description: value.description,
+      temperature: value.temperature,
+    } : null;
+    currentWeather = {
+      status: typeof payload?.status === "string" ? payload.status : "unavailable",
+      current: normalize(payload?.current),
+      nextHour: normalize(payload?.nextHour),
+      tomorrow: (
+        normalize({
+          emoji: payload?.tomorrow?.emoji,
+          description: payload?.tomorrow?.description,
+          temperature: payload?.tomorrow?.temperatureMax,
+        }) &&
+        typeof payload?.tomorrow?.temperatureMin === "number" && Number.isFinite(payload.tomorrow.temperatureMin)
+      ) ? {
+        emoji: payload.tomorrow.emoji,
+        description: payload.tomorrow.description,
+        temperatureMin: payload.tomorrow.temperatureMin,
+        temperatureMax: payload.tomorrow.temperatureMax,
+      } : null,
     };
     update();
   }
@@ -407,11 +595,12 @@
     cancelScheduledUpdate,
     ensureTimer,
     setQuota,
+    setWeather,
     getFontColor: () => fontColor,
     setFontColor,
     dispose,
     version: VERSION,
   };
 
-  console.log(`[codex-meter] widget injected (v${VERSION})`);
+  console.log(`[myco-meter] widget injected (v${VERSION})`);
 })();

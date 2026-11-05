@@ -1,7 +1,7 @@
 {
-  "name": "codex-meter",
+  "name": "myco-meter",
   "private": true,
-  "version": "0.4.2",
+  "version": "0.4.9",
   "type": "module",
   "scripts": {
     "dev": "vite",

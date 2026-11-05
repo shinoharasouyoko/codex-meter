@@ -99,7 +99,7 @@ fn first_json_object(stdout: &str) -> Option<&str> {
 }
 
 fn state_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("CodexMeter"))
+    dirs::data_dir().map(|dir| dir.join("MyCoMeter"))
 }
 
 fn state_path() -> Option<PathBuf> {

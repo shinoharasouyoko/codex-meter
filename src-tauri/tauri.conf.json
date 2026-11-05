@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CodexMeter",
-  "version": "0.4.2",
+  "productName": "MyCoMeter",
+  "version": "0.4.9",
   "identifier": "app.quotafloat.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -17,9 +17,9 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "Codex quota in the title bar",
+    "shortDescription": "Codex usage in the title bar",
     "longDescription": "A lightweight tray utility that injects read-only Codex quota into the Codex Desktop title bar.",
-    "copyright": "Copyright CodexMeter contributors",
+    "copyright": "Copyright MyCoMeter contributors",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "resources": ["resources/*"]
   }

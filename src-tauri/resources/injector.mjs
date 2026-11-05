@@ -50,7 +50,14 @@ function browserIdFromVersion(version, port) {
 }
 
 function isValidCdpPageTarget(item, port) {
-  if (item?.type !== "page" || !item.url?.startsWith("app://") || typeof item.id !== "string" ||
+  const isAppShell = item?.type === "page" && item.url?.startsWith("app://");
+  let isTrustedCodexWebView = false;
+  try {
+    const pageUrl = new URL(item?.url);
+    isTrustedCodexWebView = item?.type === "webview" &&
+      pageUrl.protocol === "https:" && pageUrl.hostname === "chatgpt.com";
+  } catch { /* target has no valid URL */ }
+  if ((!isAppShell && !isTrustedCodexWebView) || typeof item.id !== "string" ||
       !BROWSER_ID_PATTERN.test(item.id) || !item.webSocketDebuggerUrl) return false;
   try {
     const debuggerUrl = new URL(validatedDebuggerUrl(item, port));
@@ -195,6 +202,12 @@ class CdpSession {
 // --- Probe & inject ---
 export async function probeSession(session) {
   return session.evaluate(`(() => {
+    const trustedCodexWebView = () => {
+      if (location.origin !== 'https://chatgpt.com') return false;
+      const header = document.querySelector('header.draggable');
+      const input = document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+      return Boolean(header && input);
+    };
     const genericCodexSurface = () => {
       if (location.protocol !== 'app:') return false;
       const main = document.querySelector('main, [role="main"]');
@@ -202,7 +215,18 @@ export async function probeSession(session) {
       const branded = Boolean(document.querySelector(
         '[data-testid="app-shell-header-context-menu-surface"]',
       ));
-      return Boolean(main && input && branded);
+      const currentShellControls = Boolean(document.querySelector(
+        '#root > main > section [class*="controls-"]',
+      ));
+      const workspaceToolbar = Boolean(document.querySelector(
+        '#root main.no-drag > header.draggable, #root > main > header.draggable',
+      ));
+      const workspaceSidebar = Boolean(document.querySelector(
+        '#root main.no-drag aside, #root > main aside',
+      ));
+      return Boolean(main && input && (
+        branded || currentShellControls || (workspaceToolbar && workspaceSidebar)
+      )) || workspaceToolbar;
     };
     const markers = {
       shell: Boolean(document.querySelector(
@@ -214,11 +238,12 @@ export async function probeSession(session) {
         Boolean(document.querySelector('input[name="appearance-theme"]')) ||
         Boolean(document.querySelector('[data-testid="theme-preview"]')),
       generic: genericCodexSurface(),
+      webview: trustedCodexWebView(),
     };
     return {
       markers,
-      codex: location.protocol === 'app:' &&
-        ((markers.shell && markers.sidebar) || markers.settings || markers.main || markers.generic),
+      codex: markers.webview || (location.protocol === 'app:' &&
+        ((markers.shell && markers.sidebar) || markers.settings || markers.main || markers.generic)),
     };
   })()`);
 }
@@ -253,6 +278,10 @@ function fontColorExpression(color) {
   return `window.__CODEX_METER_STATE__?.setFontColor(${JSON.stringify(color)})`;
 }
 
+function weatherExpression(weather) {
+  return `window.__CODEX_METER_STATE__?.setWeather(${JSON.stringify(weather)})`;
+}
+
 async function applyQuotaToSession(session, quota) {
   if (!quota || session.closed) return;
   await session.evaluate(quotaExpression(quota));
@@ -263,7 +292,12 @@ async function applyFontColorToSession(session, color) {
   await session.evaluate(fontColorExpression(color));
 }
 
-function parseControlLine(line) {
+async function applyWeatherToSession(session, weather) {
+  if (!weather || session.closed) return;
+  await session.evaluate(weatherExpression(weather));
+}
+
+export function parseControlLine(line) {
   const normalized = line.trim();
   if (!normalized) return null;
   if (normalized.toLowerCase() === "shutdown") return { type: "shutdown" };
@@ -278,14 +312,51 @@ function parseControlLine(line) {
         : null,
     };
   }
+  if (message?.type === "weather") {
+    const parseWeather = (value) => (
+      typeof value?.emoji === "string" && value.emoji.length > 0 &&
+      typeof value?.description === "string" && value.description.length > 0 &&
+      typeof value?.temperature === "number" && Number.isFinite(value.temperature)
+    ) ? {
+      emoji: value.emoji,
+      description: value.description,
+      temperature: value.temperature,
+    } : null;
+    return {
+      type: "weather",
+      status: typeof message.status === "string" ? message.status : "unavailable",
+      current: parseWeather(message.current),
+      nextHour: parseWeather(message.nextHour),
+      tomorrow: (
+        parseWeather({
+          emoji: message.tomorrow?.emoji,
+          description: message.tomorrow?.description,
+          temperature: message.tomorrow?.temperatureMax,
+        }) &&
+        typeof message.tomorrow?.temperatureMin === "number" && Number.isFinite(message.tomorrow.temperatureMin)
+      ) ? {
+        emoji: message.tomorrow.emoji,
+        description: message.tomorrow.description,
+        temperatureMin: message.tomorrow.temperatureMin,
+        temperatureMax: message.tomorrow.temperatureMax,
+      } : null,
+    };
+  }
   if (message?.type !== "quota") return null;
+  const parseQuotaWindow = (value) => {
+    const percent = value?.percent;
+    return typeof percent === "number" && Number.isFinite(percent)
+      ? {
+          percent: Math.min(100, Math.max(0, percent)),
+          resetsAt: typeof value?.resetsAt === "string" ? value.resetsAt : null,
+        }
+      : null;
+  };
   return {
     type: "quota",
     status: typeof message.status === "string" ? message.status : "unavailable",
-    percent: typeof message.percent === "number" && Number.isFinite(message.percent)
-      ? Math.min(100, Math.max(0, message.percent))
-      : null,
-    resetsAt: typeof message.resetsAt === "string" ? message.resetsAt : null,
+    shortWindow: parseQuotaWindow(message.shortWindow),
+    weeklyWindow: parseQuotaWindow(message.weeklyWindow),
   };
 }
 
@@ -334,7 +405,7 @@ const CLEANUP_EXPRESSION = `(() => {
   if (state?.timer) clearInterval(state.timer);
   if (state?.ensureTimer) clearInterval(state.ensureTimer);
   state?.cancelScheduledUpdate?.();
-  document.querySelectorAll("#codex-meter-widget").forEach((element) => element.remove());
+  document.querySelectorAll("#myco-meter-widget").forEach((element) => element.remove());
   delete window.__CODEX_METER_STATE__;
   return true;
 })()`;
@@ -390,6 +461,7 @@ async function runWatch(options) {
   const earlyScripts = new Map(); // targetId -> identifier
   const targetFailures = new Map();
   let latestQuota = null;
+  let latestWeather = null;
   let latestFontColor;
   let stdinBuffer = "";
   let stopping = false;
@@ -415,6 +487,13 @@ async function runWatch(options) {
         for (const [id, session] of sessions) {
           applyQuotaToSession(session, latestQuota).catch((error) => {
             console.error(`[codex-meter] quota update failed for ${id}: ${error.message}`);
+          });
+        }
+      } else if (message?.type === "weather") {
+        latestWeather = message;
+        for (const [id, session] of sessions) {
+          applyWeatherToSession(session, latestWeather).catch((error) => {
+            console.error(`[codex-meter] weather update failed for ${id}: ${error.message}`);
           });
         }
       } else if (message?.type === "fontColor") {
@@ -499,6 +578,7 @@ async function runWatch(options) {
         // Inject the widget
         await applyToSession(session, script);
         await applyQuotaToSession(session, latestQuota);
+        await applyWeatherToSession(session, latestWeather);
         await applyFontColorToSession(session, latestFontColor);
         sessions.set(target.id, session);
         targetFailures.delete(target.id);
@@ -510,6 +590,7 @@ async function runWatch(options) {
             if (stopping) return;
             applyToSession(session, script)
               .then(() => applyQuotaToSession(session, latestQuota))
+              .then(() => applyWeatherToSession(session, latestWeather))
               .then(() => applyFontColorToSession(session, latestFontColor))
               .catch((error) => {
                 console.error(`[codex-meter] reinject failed for ${target.id}: ${error.message}`);

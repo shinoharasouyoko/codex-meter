@@ -1,6 +1,7 @@
 mod cdp;
 mod codex;
 mod models;
+mod weather;
 
 use std::{
     fs,
@@ -13,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use models::InjectorQuotaUpdate;
+use models::{InjectorQuotaUpdate, InjectorWeatherUpdate};
 use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
@@ -31,13 +32,13 @@ use windows::Win32::{
     },
 };
 
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const ERROR_RETRY_BASE: Duration = Duration::from_secs(30);
-const ERROR_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+const WEATHER_REFRESH_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 struct AppState {
     client: reqwest::Client,
-    fetch_lock: tokio::sync::Mutex<()>,
+    quota_fetch_lock: tokio::sync::Mutex<()>,
+    weather_fetch_lock: tokio::sync::Mutex<()>,
     injector_child: Mutex<Option<Child>>,
     font_color: Mutex<Option<String>>,
     restart_in_progress: AtomicBool,
@@ -49,7 +50,7 @@ struct DisplayPreferences {
 }
 
 fn display_preferences_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("CodexMeter").join("display.json"))
+    dirs::data_dir().map(|dir| dir.join("MyCoMeter").join("display.json"))
 }
 
 fn normalize_font_color(value: &str) -> Option<String> {
@@ -71,8 +72,8 @@ fn load_font_color() -> Option<String> {
 }
 
 fn save_font_color(color: Option<&str>) -> Result<(), String> {
-    let path = display_preferences_path().ok_or("无法定位 CodexMeter 配置目录")?;
-    let parent = path.parent().ok_or("无效的 CodexMeter 配置路径")?;
+    let path = display_preferences_path().ok_or("无法定位 MyCoMeter 配置目录")?;
+    let parent = path.parent().ok_or("无效的 MyCoMeter 配置路径")?;
     fs::create_dir_all(parent).map_err(|error| format!("无法创建配置目录: {error}"))?;
     let preferences = DisplayPreferences {
         font_color: color.map(str::to_owned),
@@ -134,23 +135,23 @@ async fn fetch_and_publish_quota(app: &AppHandle) -> bool {
     let Some(state) = app.try_state::<AppState>() else {
         return false;
     };
-    let _guard = state.fetch_lock.lock().await;
+    let _guard = state.quota_fetch_lock.lock().await;
     let snapshot = codex::fetch_snapshot(&state.client).await;
     let update = InjectorQuotaUpdate::from(&snapshot);
-    let has_quota = snapshot.status == "ok" && update.percent.is_some();
-    let message = match serde_json::to_string(&update) {
+    let has_quota = snapshot.status == "ok"
+        && (update.short_window.is_some() || update.weekly_window.is_some());
+    let quota_message = match serde_json::to_string(&update) {
         Ok(value) => value,
         Err(error) => {
             eprintln!("[quota] failed to serialize update: {error}");
             return false;
         }
     };
-
     let sent = state
         .injector_child
         .lock()
         .map_err(|_| "injector state is unavailable".to_string())
-        .and_then(|mut child| cdp::send_injector_message(&mut child, &message));
+        .and_then(|mut child| cdp::send_injector_message(&mut child, &quota_message));
     if let Err(error) = sent {
         eprintln!("[quota] failed to publish update: {error}");
         return false;
@@ -159,38 +160,67 @@ async fn fetch_and_publish_quota(app: &AppHandle) -> bool {
     has_quota
 }
 
-fn request_quota_refresh(app: &AppHandle) {
+async fn fetch_and_publish_weather(app: &AppHandle) -> bool {
+    let Some(state) = app.try_state::<AppState>() else {
+        return false;
+    };
+    let _guard = state.weather_fetch_lock.lock().await;
+    let weather_update = match weather::fetch_snapshot(&state.client).await {
+        Ok(snapshot) => InjectorWeatherUpdate::from(&snapshot),
+        Err(error) => {
+            eprintln!("[weather] {error}");
+            InjectorWeatherUpdate::unavailable()
+        }
+    };
+    let weather_message = match serde_json::to_string(&weather_update) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("[weather] failed to serialize update: {error}");
+            return false;
+        }
+    };
+    let sent = state
+        .injector_child
+        .lock()
+        .map_err(|_| "injector state is unavailable".to_string())
+        .and_then(|mut child| cdp::send_injector_message(&mut child, &weather_message));
+    if let Err(error) = sent {
+        eprintln!("[weather] failed to publish update: {error}");
+        return false;
+    }
+    weather_update.status == "ok"
+}
+
+fn request_status_refresh(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = fetch_and_publish_quota(&app).await;
+        let _ = tokio::join!(
+            fetch_and_publish_quota(&app),
+            fetch_and_publish_weather(&app)
+        );
     });
 }
 
 fn start_quota_refresh_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
-        let mut failures = 0u32;
         loop {
-            let succeeded = fetch_and_publish_quota(&app).await;
-            failures = if succeeded {
-                0
-            } else {
-                failures.saturating_add(1)
-            };
-            let delay = if failures == 0 {
-                REFRESH_INTERVAL
-            } else {
-                let multiplier = 1u64 << failures.saturating_sub(1).min(5);
-                ERROR_RETRY_BASE
-                    .saturating_mul(multiplier as u32)
-                    .min(ERROR_RETRY_MAX)
-            };
-            tokio::time::sleep(delay).await;
+            let _ = fetch_and_publish_quota(&app).await;
+            tokio::time::sleep(REFRESH_INTERVAL).await;
+        }
+    });
+}
+
+fn start_weather_refresh_loop(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let _ = fetch_and_publish_weather(&app).await;
+            tokio::time::sleep(WEATHER_REFRESH_INTERVAL).await;
         }
     });
 }
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
-    let refresh = MenuItem::with_id(app, "refresh", "立即刷新", true, None::<&str>)?;
+    let refresh = MenuItem::with_id(app, "refresh", "立即刷新用量和天气", true, None::<&str>)?;
     let restart_codex = MenuItem::with_id(app, "restart_codex", "重启 Codex", true, None::<&str>)?;
     let font_color = MenuItem::with_id(app, "font_color", "设置电量字体颜色…", true, None::<&str>)?;
     let reset_font_color = MenuItem::with_id(
@@ -223,7 +253,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .tooltip("CodexMeter");
+        .tooltip("MyCoMeter");
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());
     }
@@ -231,7 +261,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let restart_menu = restart_codex.clone();
     builder
         .on_menu_event(move |app, event| match event.id.as_ref() {
-            "refresh" => request_quota_refresh(app),
+            "refresh" => request_status_refresh(app),
             "restart_codex" => request_codex_restart(app, &restart_menu),
             "font_color" => {
                 let initial = app
@@ -286,7 +316,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 fn attach_injector(app: &AppHandle, session: &cdp::CdpSession) -> Result<(), String> {
     let state = app
         .try_state::<AppState>()
-        .ok_or_else(|| "CodexMeter state is unavailable".to_string())?;
+        .ok_or_else(|| "MyCoMeter state is unavailable".to_string())?;
     let font_color = state
         .font_color
         .lock()
@@ -326,7 +356,7 @@ fn confirm_codex_restart() -> bool {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
-    let caption: Vec<u16> = "CodexMeter"
+    let caption: Vec<u16> = "MyCoMeter"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -347,7 +377,7 @@ fn report_codex_restart_error(error: &str) {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let caption: Vec<u16> = "CodexMeter"
+    let caption: Vec<u16> = "MyCoMeter"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -364,7 +394,7 @@ fn report_codex_restart_error(error: &str) {
 fn restart_codex(app: &AppHandle) -> Result<(), String> {
     let state = app
         .try_state::<AppState>()
-        .ok_or_else(|| "CodexMeter state is unavailable".to_string())?;
+        .ok_or_else(|| "MyCoMeter state is unavailable".to_string())?;
     if let Ok(mut injector) = state.injector_child.lock() {
         cdp::kill_injector(&mut injector);
     } else {
@@ -373,7 +403,7 @@ fn restart_codex(app: &AppHandle) -> Result<(), String> {
 
     let session = cdp::restart_codex_cdp(cdp::DEFAULT_CDP_PORT)?;
     attach_injector(app, &session)?;
-    request_quota_refresh(app);
+    request_status_refresh(app);
     Ok(())
 }
 
@@ -383,7 +413,7 @@ fn request_codex_restart(app: &AppHandle, restart_menu: &MenuItem<tauri::Wry>) {
         return;
     }
     let Some(state) = app.try_state::<AppState>() else {
-        report_codex_restart_error("CodexMeter state is unavailable");
+        report_codex_restart_error("MyCoMeter state is unavailable");
         return;
     };
     if state.restart_in_progress.swap(true, Ordering::AcqRel) {
@@ -422,26 +452,9 @@ fn init_cdp(app: &AppHandle) -> bool {
             eprintln!("[cdp] no reusable CDP: {probe_error}");
             #[cfg(windows)]
             {
-                let text: Vec<u16> = "Codex 未启用调试端口，是否重启 Codex 以启用额度显示？"
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let caption: Vec<u16> = "CodexMeter"
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let result = unsafe {
-                    MessageBoxW(
-                        None,
-                        windows::core::PCWSTR(text.as_ptr()),
-                        windows::core::PCWSTR(caption.as_ptr()),
-                        MB_YESNO | MB_ICONQUESTION,
-                    )
-                };
-                if result != IDYES {
-                    app.exit(0);
-                    return false;
-                }
+                // On startup a missing CDP listener simply means Codex was
+                // launched without debug flags. Restart it silently so
+                // autostart never blocks behind a confirmation dialog.
             }
             #[cfg(not(windows))]
             {
@@ -471,7 +484,7 @@ fn init_cdp(app: &AppHandle) -> bool {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            request_quota_refresh(app);
+            request_status_refresh(app);
         }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
@@ -481,12 +494,13 @@ pub fn run() {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(12))
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent("CodexMeter/0.2")
+                .user_agent("MyCoMeter/0.4.7")
                 .build()
                 .expect("static HTTP client configuration must be valid");
             app.manage(AppState {
                 client,
-                fetch_lock: tokio::sync::Mutex::new(()),
+                quota_fetch_lock: tokio::sync::Mutex::new(()),
+                weather_fetch_lock: tokio::sync::Mutex::new(()),
                 injector_child: Mutex::new(None),
                 font_color: Mutex::new(load_font_color()),
                 restart_in_progress: AtomicBool::new(false),
@@ -494,11 +508,12 @@ pub fn run() {
             setup_tray(app)?;
             if init_cdp(app.handle()) {
                 start_quota_refresh_loop(app.handle().clone());
+                start_weather_refresh_loop(app.handle().clone());
             }
             Ok(())
         })
         .build(tauri::generate_context!())
-        .expect("failed to build CodexMeter");
+        .expect("failed to build MyCoMeter");
 
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
@@ -513,7 +528,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_font_color;
+    use super::*;
 
     #[test]
     fn normalizes_only_six_digit_hex_font_colors() {
@@ -521,5 +536,11 @@ mod tests {
         assert_eq!(normalize_font_color("#FFF"), None);
         assert_eq!(normalize_font_color("rgb(255, 255, 255)"), None);
         assert_eq!(normalize_font_color("#ABC12G"), None);
+    }
+
+    #[test]
+    fn refreshes_quota_every_ten_seconds_and_weather_every_thirty_minutes() {
+        assert_eq!(REFRESH_INTERVAL, Duration::from_secs(10));
+        assert_eq!(WEATHER_REFRESH_INTERVAL, Duration::from_secs(30 * 60));
     }
 }

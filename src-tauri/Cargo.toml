@@ -1,13 +1,13 @@
 [package]
-name = "codex-meter"
-version = "0.4.2"
-description = "Codex title-bar quota meter"
-authors = ["CodexMeter contributors"]
+name = "myco-meter"
+version = "0.4.9"
+description = "Codex title-bar usage meter"
+authors = ["MyCoMeter contributors"]
 license = "MIT"
 edition = "2021"
 
 [lib]
-name = "quota_float_lib"
+name = "myco_meter_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
