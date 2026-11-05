@@ -1,6 +1,6 @@
 (() => {
   const HOST_ID = "myco-meter-widget";
-  const VERSION = "0.4.9";
+  const VERSION = "0.4.10";
 
   const previous = window.__CODEX_METER_STATE__;
   if (typeof previous?.dispose === "function") {

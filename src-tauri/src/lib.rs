@@ -253,6 +253,10 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let mut builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
+        // Windows shows the hidden-icons flyout on the taskbar. Keeping the
+        // native menu on right click only avoids competing with that flyout
+        // when the user selects the tray icon with the left button.
+        .show_menu_on_left_click(false)
         .tooltip("MyCoMeter");
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());

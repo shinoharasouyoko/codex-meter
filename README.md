@@ -2,7 +2,7 @@
 
 MyCoMeter 是一个 Windows 托盘工具。它在本机将额度和天气组件显示到 Codex Desktop 顶端，直接复用已登录的 Codex 会话，不修改官方安装包，也不要求额外登录。
 
-当前发布版本：[v0.4.9](https://github.com/shinoharasouyoko/codex-meter/releases/tag/v0.4.9)
+当前发布版本：[v0.4.10](https://github.com/shinoharasouyoko/codex-meter/releases/tag/v0.4.10)
 
 ## 界面预览
 
