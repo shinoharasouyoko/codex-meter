@@ -22,7 +22,7 @@ pub struct WeatherSnapshot {
     pub tomorrow: DailyWeatherReading,
 }
 
-const IP_GEOLOCATION_URL: &str = "https://ipwho.is/";
+const LOCATION_SOURCE: &str = "Windows 系统定位";
 const WEATHER_URL: &str = "https://api.open-meteo.com/v1/forecast";
 const FORECAST_DAYS: u8 = 2;
 const WEATHER_TIME_ZONE: &str = "Asia/Shanghai";
@@ -76,6 +76,49 @@ fn field_code(value: &Value, key: &str) -> Option<i64> {
         .get(key)?
         .as_i64()
         .or_else(|| value.get(key)?.as_f64().map(|number| number.round() as i64))
+}
+
+fn validate_coordinates(latitude: f64, longitude: f64) -> Result<(f64, f64), &'static str> {
+    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
+        return Err("Windows 系统定位返回的坐标无效");
+    }
+    Ok((latitude, longitude))
+}
+
+fn location_unavailable_error() -> String {
+    format!("{LOCATION_SOURCE}暂不可用")
+}
+
+#[cfg(windows)]
+async fn system_coordinates() -> Result<(f64, f64), String> {
+    use windows::Devices::Geolocation::{GeolocationAccessStatus, Geolocator};
+
+    let access = Geolocator::RequestAccessAsync()
+        .map_err(|_| location_unavailable_error())?
+        .await
+        .map_err(|_| location_unavailable_error())?;
+    if access != GeolocationAccessStatus::Allowed {
+        return Err("请在 Windows 设置中允许此应用访问位置".into());
+    }
+
+    let locator = Geolocator::new().map_err(|_| location_unavailable_error())?;
+    let position = locator
+        .GetGeopositionAsync()
+        .map_err(|_| location_unavailable_error())?
+        .await
+        .map_err(|_| location_unavailable_error())?;
+    let coordinates = position
+        .Coordinate()
+        .and_then(|coordinate| coordinate.Point())
+        .and_then(|point| point.Position())
+        .map_err(|_| "Windows 系统定位未返回坐标".to_string())?;
+
+    validate_coordinates(coordinates.Latitude, coordinates.Longitude).map_err(str::to_owned)
+}
+
+#[cfg(not(windows))]
+async fn system_coordinates() -> Result<(f64, f64), String> {
+    Err("当前系统不支持 Windows 系统定位".into())
 }
 
 pub fn parse_forecast(value: &Value) -> Result<WeatherSnapshot, &'static str> {
@@ -160,25 +203,7 @@ pub fn parse_forecast(value: &Value) -> Result<WeatherSnapshot, &'static str> {
 }
 
 pub async fn fetch_snapshot(client: &reqwest::Client) -> Result<WeatherSnapshot, String> {
-    let location: Value = client
-        .get(IP_GEOLOCATION_URL)
-        .timeout(std::time::Duration::from_secs(8))
-        .send()
-        .await
-        .map_err(|_| "IP 定位服务暂不可用".to_string())?
-        .error_for_status()
-        .map_err(|_| "IP 定位服务暂不可用".to_string())?
-        .json()
-        .await
-        .map_err(|_| "IP 定位响应无效".to_string())?;
-    if location.get("success").and_then(Value::as_bool) == Some(false) {
-        return Err("IP 定位服务暂不可用".into());
-    }
-    let latitude = field_number(&location, "latitude").ok_or("IP 定位未返回坐标")?;
-    let longitude = field_number(&location, "longitude").ok_or("IP 定位未返回坐标")?;
-    if !(-90.0..=90.0).contains(&latitude) || !(-180.0..=180.0).contains(&longitude) {
-        return Err("IP 定位返回的坐标无效".into());
-    }
+    let (latitude, longitude) = system_coordinates().await?;
     let forecast: Value = client
         .get(WEATHER_URL)
         .query(&[
@@ -296,5 +321,23 @@ mod tests {
     #[test]
     fn requests_the_forecast_in_the_computers_east_eight_time_zone() {
         assert_eq!(WEATHER_TIME_ZONE, "Asia/Shanghai");
+    }
+
+    #[test]
+    fn accepts_valid_windows_location_coordinates() {
+        assert_eq!(validate_coordinates(31.2304, 121.4737), Ok((31.2304, 121.4737)));
+    }
+
+    #[test]
+    fn rejects_invalid_windows_location_coordinates() {
+        assert_eq!(
+            validate_coordinates(91.0, 121.4737),
+            Err("Windows 系统定位返回的坐标无效")
+        );
+    }
+
+    #[test]
+    fn identifies_windows_as_the_location_source() {
+        assert_eq!(LOCATION_SOURCE, "Windows 系统定位");
     }
 }

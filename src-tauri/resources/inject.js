@@ -1,6 +1,6 @@
 (() => {
   const HOST_ID = "myco-meter-widget";
-  const VERSION = "0.4.10";
+  const VERSION = "0.4.12";
 
   const previous = window.__CODEX_METER_STATE__;
   if (typeof previous?.dispose === "function") {
@@ -483,7 +483,7 @@
       nextWeatherEl.textContent = `1小时后 ${currentWeather.nextHour.emoji} ${currentWeather.nextHour.description} ${Math.round(currentWeather.nextHour.temperature)}°`;
       tomorrowWeatherEl.textContent = `　|　明天 ${currentWeather.tomorrow.emoji} ${currentWeather.tomorrow.description} ${Math.round(currentWeather.tomorrow.temperatureMin)}°/${Math.round(currentWeather.tomorrow.temperatureMax)}°`;
       weather.dataset.status = "ok";
-      weather.title = "天气数据：Open-Meteo；城市级 IP 定位";
+      weather.title = "天气数据：Open-Meteo；Windows 系统定位";
     } else {
       currentWeatherEl.textContent = "天气暂不可用";
       nextWeatherEl.textContent = "右键托盘后立即刷新";

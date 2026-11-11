@@ -63,6 +63,20 @@ function Get-ExpectedNodeSha256 {
   throw "Could not find win-x64/node.exe checksum in SHASUMS256.txt for v$Version"
 }
 
+function Get-Sha256 {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $algorithm = [System.Security.Cryptography.SHA256]::Create()
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    return -join ($algorithm.ComputeHash($stream) | ForEach-Object { $_.ToString("x2") })
+  }
+  finally {
+    $stream.Dispose()
+    $algorithm.Dispose()
+  }
+}
+
 function Ensure-BundledNode {
   param([Parameter(Mandatory = $true)][string]$Version)
 
@@ -74,7 +88,7 @@ function Ensure-BundledNode {
   $expectedHash = Get-ExpectedNodeSha256 -Version $Version
 
   if (Test-Path -LiteralPath $cachedNode) {
-    $actualHash = (Get-FileHash -LiteralPath $cachedNode -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualHash = Get-Sha256 -Path $cachedNode
     if ($actualHash -ne $expectedHash) {
       Write-Host "[package] Cached node.exe hash mismatch; re-downloading v$Version"
       Remove-Item -LiteralPath $cachedNode -Force
@@ -85,7 +99,7 @@ function Ensure-BundledNode {
     $downloadUrl = "https://nodejs.org/dist/v$Version/win-x64/node.exe"
     Write-Host "[package] Downloading Node.js v$Version win-x64/node.exe"
     Invoke-WebRequest -Uri $downloadUrl -OutFile $cachedNode -UseBasicParsing
-    $actualHash = (Get-FileHash -LiteralPath $cachedNode -Algorithm SHA256).Hash.ToLowerInvariant()
+    $actualHash = Get-Sha256 -Path $cachedNode
     if ($actualHash -ne $expectedHash) {
       Remove-Item -LiteralPath $cachedNode -Force -ErrorAction SilentlyContinue
       throw "Downloaded node.exe SHA256 mismatch. Expected $expectedHash, got $actualHash"

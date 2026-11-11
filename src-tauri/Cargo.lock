@@ -2078,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "myco-meter"
-version = "0.4.9"
+version = "0.4.12"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2092,6 +2092,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "windows",
+ "windows-future",
 ]
 
 [[package]]
