@@ -1,6 +1,6 @@
 [package]
 name = "myco-meter"
-version = "0.4.12"
+version = "0.4.14"
 description = "Codex title-bar usage meter"
 authors = ["MyCoMeter contributors"]
 license = "MIT"

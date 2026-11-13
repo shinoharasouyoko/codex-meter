@@ -50,7 +50,17 @@ function browserIdFromVersion(version, port) {
 }
 
 function isValidCdpPageTarget(item, port) {
-  const isAppShell = item?.type === "page" && item.url?.startsWith("app://");
+  // The virtual pet uses a separate always-on-top desktop page at
+  // app://-/index.html?initialRoute=/avatar-overlay. It can satisfy the
+  // renderer probe, but must never receive a title-bar widget. The main
+  // Codex window is the same path without a route query or fragment.
+  let isAppShell = false;
+  try {
+    const appUrl = new URL(item?.url);
+    isAppShell = item?.type === "page" &&
+      appUrl.protocol === "app:" && appUrl.hostname === "-" &&
+      appUrl.pathname === "/index.html" && !appUrl.search && !appUrl.hash;
+  } catch { /* target has no valid URL */ }
   let isTrustedCodexWebView = false;
   try {
     const pageUrl = new URL(item?.url);
